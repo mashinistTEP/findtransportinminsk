@@ -26,7 +26,7 @@ from minsktrans_client import (
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 log = logging.getLogger("bot")
 
-BOT_TOKEN = os.environ.get("8663288366:AAFF4YrhctpqRex-Nwj2PxJekoaS3GudZqw")
+BOT_TOKEN = os.environ.get("BOT_TOKEN")
 if not BOT_TOKEN:
     raise SystemExit("Не задан BOT_TOKEN (переменная окружения)")
 
