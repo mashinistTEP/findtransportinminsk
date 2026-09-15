@@ -10,6 +10,8 @@ bot.py — телеграм-бот поиска маршрута по гос. н
 
 import logging
 import os
+import threading
+from http.server import BaseHTTPRequestHandler, HTTPServer
 
 import telebot
 from telebot import types
@@ -24,7 +26,7 @@ from minsktrans_client import (
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 log = logging.getLogger("bot")
 
-BOT_TOKEN = os.environ.get("8663288366:AAHVIBXj-FwRiyQ7lHL8iot6xI_S8yHFIJI")
+BOT_TOKEN = os.environ.get("8663288366:AAFF4YrhctpqRex-Nwj2PxJekoaS3GudZqw")
 if not BOT_TOKEN:
     raise SystemExit("Не задан BOT_TOKEN (переменная окружения)")
 
@@ -76,9 +78,7 @@ def cmd_start(message):
     user_state[message.chat.id] = {}
     bot.send_message(
         message.chat.id,
-        "Привет! Это бот для поиска ПС по Минску. Укажи тип транспорта, гос. номер — найдется маршрут, ближайшая остановка и направление.
-
-Внимание! Бот может отвечать с задержкой",
+        "Привет! Это бот для поиска ПС по Минску. Укажи тип транспорта, гос. номер — найдется маршрут, ближайшая остановка и направление.\n\nВнимание! Бот может отвечать с задержкой.",
         reply_markup=main_menu(),
     )
 
@@ -124,6 +124,24 @@ def fallback(message):
     bot.send_message(message.chat.id, "Не понял. Нажми «Искать», чтобы начать поиск.", reply_markup=main_menu())
 
 
+def _run_keepalive():
+    """Крошечный HTTP-сервер — нужен только для того, чтобы Render не усыпил
+    процесс. UptimeRobot пингует его каждые 5 минут на /health."""
+    port = int(os.environ.get("PORT", 8080))
+
+    class _Handler(BaseHTTPRequestHandler):
+        def do_GET(self):
+            self.send_response(200)
+            self.end_headers()
+            self.wfile.write(b"ok")
+
+        def log_message(self, *args):
+            pass  # не засорять лог пингами
+
+    HTTPServer(("0.0.0.0", port), _Handler).serve_forever()
+
+
 if __name__ == "__main__":
+    threading.Thread(target=_run_keepalive, daemon=True).start()
     log.info("Бот запущен, жду сообщений")
     bot.infinity_polling()
