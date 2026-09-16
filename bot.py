@@ -143,5 +143,8 @@ def _run_keepalive():
 
 if __name__ == "__main__":
     threading.Thread(target=_run_keepalive, daemon=True).start()
+    # Сбрасываем вебхук и сессию перед стартом — при перезапуске на Render
+    # два экземпляра могут конфликтовать (ошибка 409 Conflict).
+    bot.remove_webhook()
     log.info("Бот запущен, жду сообщений")
-    bot.infinity_polling()
+    bot.infinity_polling(skip_pending=True, timeout=30, long_polling_timeout=30)
