@@ -22,7 +22,7 @@ import requests
 log = logging.getLogger("minsktrans")
 
 BASE = "https://minsktrans.by/lookout_yard"
-SLEEP_BETWEEN_REQUESTS = 0.3
+SLEEP_BETWEEN_REQUESTS = 0.5
 
 VEHICLE_TYPES = {
     "bus":     "bus",
@@ -88,10 +88,18 @@ class MinsktransClient:
             log.warning("POST %s → HTTP %d: %s", endpoint, resp.status_code, resp.text[:200])
             resp.raise_for_status()
         time.sleep(SLEEP_BETWEEN_REQUESTS)
+        if not resp.text.strip():
+            # пустой ответ — скорее всего сессия протухла, обновляем токен
+            if retry:
+                log.warning("POST %s → пустой ответ (HTTP %d), обновляю токен", endpoint, resp.status_code)
+                self._bootstrap()
+                return self._post(endpoint, data, retry=False)
+            log.error("POST %s → пустой ответ даже после обновления токена", endpoint)
+            raise ValueError("empty response")
         try:
             return resp.json()
         except Exception:
-            log.error("POST %s: не JSON: %s", endpoint, resp.text[:300])
+            log.error("POST %s (HTTP %d): не JSON: %s", endpoint, resp.status_code, resp.text[:300])
             raise
 
     def get_scoreboard(self, stop_id):
@@ -233,7 +241,7 @@ def find_vehicle(client, vtype, gos_nomer, routes_cache):
             if not lat or not lon:
                 continue
 
-            for stop_id, stop_name, dkey in _nearest_stops(trips, lat, lon, n=3):
+            for stop_id, stop_name, dkey in _nearest_stops(trips, lat, lon, n=1):
                 if stop_id in checked_stops:
                     continue
                 checked_stops.add(stop_id)
