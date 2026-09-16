@@ -142,9 +142,21 @@ def _run_keepalive():
 
 
 if __name__ == "__main__":
+    import time as _time
     threading.Thread(target=_run_keepalive, daemon=True).start()
-    # Сбрасываем вебхук и сессию перед стартом — при перезапуске на Render
-    # два экземпляра могут конфликтовать (ошибка 409 Conflict).
     bot.remove_webhook()
     log.info("Бот запущен, жду сообщений")
-    bot.infinity_polling(skip_pending=True, timeout=30, long_polling_timeout=30)
+    # При деплое на Render старый экземпляр может ещё жить несколько секунд.
+    # Ловим 409 и повторяем попытку каждые 10 сек пока не освободится.
+    while True:
+        try:
+            bot.infinity_polling(timeout=30, long_polling_timeout=30)
+        except telebot.apihelper.ApiTelegramException as e:
+            if e.error_code == 409:
+                log.warning("409 Conflict — старый экземпляр ещё жив, жду 10 сек…")
+                _time.sleep(10)
+                continue
+            raise
+        except Exception as e:
+            log.error("Ошибка polling: %s", e)
+            _time.sleep(5)
