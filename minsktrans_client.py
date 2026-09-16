@@ -1,6 +1,15 @@
 """
 minsktrans_client.py — клиент lookout_yard API Минсктранса.
 Эндпоинты восстановлены из реального трафика Chrome (PCAPdroid, 13-14.09.2026).
+
+Ключевое замечание (обнаружено 16.09):
+    Data/Vehicles.Id — это ВНУТРЕННИЙ номер депо, не гос. номер на табло.
+    Гос. номер (то что показывает табло и что вводит пользователь) хранится
+    в Data/Scoreboard -> Routes[i].VehicleNumberFirst / VehicleNumberSecond.
+    Поэтому поиск строится так:
+        1. Data/Vehicles(маршрут) — узнаём где находятся машины (координаты)
+        2. Из координат ищем ближайшие остановки по данным маршрута
+        3. Data/Scoreboard(остановка) — ищем гос. номер в VehicleNumberFirst/Second
 """
 
 import json
@@ -47,35 +56,27 @@ class MinsktransClient:
         self._bootstrap()
 
     def _bootstrap(self):
-        log.info("Bootstrap: получаю CSRF-токен с сайта…")
+        log.info("Bootstrap: получаю CSRF-токен…")
         resp = self.session.get(f"{BASE}/Home/Index/{self.place}", timeout=20)
         resp.raise_for_status()
-
-        # пробуем несколько вариантов разметки — сайт мог слегка измениться
-        patterns = [
+        for p in [
             r'name="__RequestVerificationToken"[^>]*value="([^"]+)"',
             r'value="([^"]+)"[^>]*name="__RequestVerificationToken"',
             r'"__RequestVerificationToken"\s*:\s*"([^"]+)"',
-        ]
-        for p in patterns:
+        ]:
             m = re.search(p, resp.text)
             if m:
                 self.token = m.group(1)
-                log.info("Bootstrap OK, токен получен (len=%d)", len(self.token))
+                log.info("Bootstrap OK (len=%d)", len(self.token))
                 return
-
-        # если ни один не сработал — показываем кусок страницы для диагностики
-        log.error("Bootstrap FAIL: не найден __RequestVerificationToken")
-        log.error("Начало страницы (первые 500 символов):\n%s", resp.text[:500])
-        raise RuntimeError("Не нашёл __RequestVerificationToken — см. логи")
+        log.error("Bootstrap FAIL. Начало страницы:\n%s", resp.text[:500])
+        raise RuntimeError("Не нашёл __RequestVerificationToken")
 
     def _post(self, endpoint, data, retry=True):
         payload = dict(data)
         payload["__RequestVerificationToken"] = self.token
         try:
-            resp = self.session.post(
-                f"{BASE}/Data/{endpoint}", data=payload, timeout=20
-            )
+            resp = self.session.post(f"{BASE}/Data/{endpoint}", data=payload, timeout=20)
         except requests.RequestException as e:
             log.warning("POST %s сетевая ошибка: %s", endpoint, e)
             raise
@@ -90,7 +91,7 @@ class MinsktransClient:
         try:
             return resp.json()
         except Exception:
-            log.error("POST %s: не удалось разобрать JSON: %s", endpoint, resp.text[:300])
+            log.error("POST %s: не JSON: %s", endpoint, resp.text[:300])
             raise
 
     def get_scoreboard(self, stop_id):
@@ -111,40 +112,28 @@ class MinsktransClient:
 
 
 def discover_routes(client, vtype, max_number=150):
-    """Обходим номера 1..max_number, оставляем те, у которых есть остановки."""
     routes = {}
-    log.info("discover_routes [%s]: проверяю номера 1..%d", vtype, max_number)
-
-    # --- диагностика: смотрим что реально возвращает /Data/Route для маршрута 1 ---
+    log.info("discover_routes [%s]: проверяю 1..%d", vtype, max_number)
     try:
         sample = client.get_route(vtype, 1)
-        log.info("ДИАГНОСТИКА Route[%s][1] raw keys: %s", vtype, list(sample.keys()))
-        trips_sample = sample.get("Trips") or sample.get("trips") or {}
-        log.info("ДИАГНОСТИКА Trips keys: %s", list(trips_sample.keys()) if trips_sample else "нет Trips")
+        trips_s = sample.get("Trips") or {}
+        log.info("ДИАГНОСТИКА Route[%s][1] Trips keys: %s", vtype, list(trips_s.keys()))
     except Exception as e:
         log.warning("ДИАГНОСТИКА Route[%s][1] exception: %s", vtype, e)
-
     for n in range(1, max_number + 1):
         try:
             data = client.get_route(vtype, n)
         except Exception as e:
             log.debug("Route[%s][%d] ошибка: %s", vtype, n, e)
             continue
-
-        # пробуем оба регистра ключа на случай расхождения
         trips = data.get("Trips") or data.get("trips")
         if not trips:
             continue
-
-        stops_a = trips.get("StopsA") or trips.get("stopsA") or []
-        stops_b = trips.get("StopsB") or trips.get("stopsB") or []
+        stops_a = trips.get("StopsA") or []
+        stops_b = trips.get("StopsB") or []
         if not stops_a and not stops_b:
             continue
-
         routes[str(n)] = trips
-        log.debug("Route[%s][%d] найден: StopsA=%d StopsB=%d",
-                  vtype, n, len(stops_a), len(stops_b))
-
     log.info("discover_routes [%s]: итого %d маршрутов", vtype, len(routes))
     return routes
 
@@ -155,7 +144,7 @@ def load_routes_cache(path=ROUTES_CACHE_FILE):
             with open(path, "r", encoding="utf-8") as f:
                 return json.load(f)
         except Exception as e:
-            log.warning("Не удалось прочитать кэш %s: %s", path, e)
+            log.warning("Не удалось прочитать кэш: %s", e)
     return {}
 
 
@@ -164,17 +153,17 @@ def save_routes_cache(cache, path=ROUTES_CACHE_FILE):
         with open(path, "w", encoding="utf-8") as f:
             json.dump(cache, f, ensure_ascii=False)
     except Exception as e:
-        log.warning("Не удалось сохранить кэш %s: %s", path, e)
+        log.warning("Не удалось сохранить кэш: %s", e)
 
 
 def get_or_build_routes(client, vtype, cache_path=ROUTES_CACHE_FILE):
     cache = load_routes_cache(cache_path)
     if vtype not in cache or not cache[vtype]:
-        log.info("Кэш для [%s] пуст или отсутствует — строю заново", vtype)
+        log.info("Кэш [%s] пуст — строю заново", vtype)
         cache[vtype] = discover_routes(client, vtype)
         save_routes_cache(cache, cache_path)
     else:
-        log.info("Кэш для [%s]: %d маршрутов (с диска)", vtype, len(cache[vtype]))
+        log.info("Кэш [%s]: %d маршрутов (с диска)", vtype, len(cache[vtype]))
     return cache[vtype]
 
 
@@ -186,8 +175,10 @@ def _haversine_m(lat1, lon1, lat2, lon2):
     return 2 * 6371000 * asin(sqrt(a))
 
 
-def _nearest_stop(trips, lat, lon):
-    best = None
+def _nearest_stops(trips, lat, lon, n=3):
+    """Возвращает n ближайших остановок маршрута к точке (lat, lon).
+    Список: [(stop_id, stop_name, direction_key), ...]"""
+    candidates = []
     for stops_key, names_key, dkey in (
         ("StopsA", "StopNamesA", "A"), ("StopsB", "StopNamesB", "B")
     ):
@@ -199,84 +190,97 @@ def _nearest_stop(trips, lat, lon):
             if slat is None or slon is None:
                 continue
             d = _haversine_m(lat, lon, slat, slon)
-            name = names[i] if i < len(names) else stop.get("Name") or stop.get("name")
-            if best is None or d < best[0]:
-                best = (d, stop.get("Id") or stop.get("id"), name, dkey)
-    if best is None:
-        return None
-    return best[1], best[2], best[3]
-
-
-def _eta_for_match(board, type_letter, route_number, target):
-    for route in board.get("Routes", []):
-        if route.get("Type") != type_letter:
-            continue
-        if str(route.get("Number", "")).strip() != str(route_number).strip():
-            continue
-        info = route.get("Info") or []
-        for slot, idx in (("VehicleNumberFirst", 0), ("VehicleNumberSecond", 1)):
-            num = (route.get(slot) or "").strip().lower()
-            if num == target and idx < len(info):
-                try:
-                    return int(info[idx])
-                except (ValueError, TypeError):
-                    return None
-    return None
+            name = names[i] if i < len(names) else stop.get("Name")
+            sid = stop.get("Id") or stop.get("id")
+            candidates.append((d, sid, name, dkey))
+    candidates.sort(key=lambda x: x[0])
+    return [(sid, name, dkey) for _, sid, name, dkey in candidates[:n]]
 
 
 def find_vehicle(client, vtype, gos_nomer, routes_cache):
+    """
+    Алгоритм (исправлен 16.09 — Vehicles.Id ≠ гос. номер):
+      1. Data/Vehicles(маршрут) → координаты всех машин на маршруте
+      2. Для каждой машины → 3 ближайшие остановки из данных маршрута
+      3. Data/Scoreboard(остановка) → ищем гос. номер в VehicleNumberFirst/Second
+      4. Нашли → берём маршрут/направление/ETA прямо из Scoreboard
+    """
     target = gos_nomer.strip().lower()
     type_letter = SCOREBOARD_TYPE_LETTER[vtype]
     log.info("find_vehicle: ищу '%s' [%s], маршрутов в кэше: %d",
              gos_nomer, vtype, len(routes_cache))
 
     if not routes_cache:
-        log.warning("find_vehicle: кэш маршрутов пуст — поиск невозможен")
+        log.warning("find_vehicle: кэш пуст")
         return None
+
+    checked_stops = set()  # не проверяем одну остановку дважды
 
     for route_number, trips in routes_cache.items():
         try:
             data = client.get_vehicles(vtype, route_number)
         except Exception as e:
-            log.debug("Vehicles[%s][%s] ошибка: %s", vtype, route_number, e)
+            log.debug("Vehicles[%s][%s]: %s", vtype, route_number, e)
             continue
 
         vehicles = data.get("Vehicles") or []
-        # логируем первый маршрут с машинами для диагностики формата Id
-        if vehicles and route_number == next(iter(routes_cache)):
-            log.info("ДИАГНОСТИКА Vehicles[%s][%s]: первая машина=%s",
-                     vtype, route_number, vehicles[0])
+        if not vehicles:
+            continue
 
         for v in vehicles:
-            vid = str(v.get("Id", "")).strip().lower()
-            if vid != target:
-                continue
-
-            log.info("Нашёл машину '%s' на маршруте %s", gos_nomer, route_number)
-
             lat = v.get("Latitude") or v.get("latitude")
             lon = v.get("Longitude") or v.get("longitude")
-            nearest = _nearest_stop(trips, lat, lon) if (lat and lon) else None
-            stop_id, stop_name, dkey = nearest if nearest else (None, None, None)
-            direction = trips.get(f"Name{dkey}") if dkey else None
+            if not lat or not lon:
+                continue
 
-            eta = None
-            if stop_id is not None:
+            for stop_id, stop_name, dkey in _nearest_stops(trips, lat, lon, n=3):
+                if stop_id in checked_stops:
+                    continue
+                checked_stops.add(stop_id)
+
                 try:
                     board = client.get_scoreboard(stop_id)
-                    eta = _eta_for_match(board, type_letter, route_number, target)
-                    if stop_name is None:
-                        stop_name = board.get("StopName")
                 except Exception as e:
-                    log.warning("Scoreboard[%s] ошибка: %s", stop_id, e)
+                    log.debug("Scoreboard[%s]: %s", stop_id, e)
+                    continue
 
-            return {
-                "type": type_letter,
-                "route": route_number,
-                "direction": direction,
-                "nearest_stop": stop_name,
-                "eta_minutes": eta,
-            }
+                for route_entry in board.get("Routes") or []:
+                    if route_entry.get("Type") != type_letter:
+                        continue
+                    info = route_entry.get("Info") or []
+                    for slot, idx in (("VehicleNumberFirst", 0), ("VehicleNumberSecond", 1)):
+                        num = (route_entry.get(slot) or "").strip().lower()
+                        if num != target:
+                            continue
 
-    log.info("find_vehicle: машина '%s' не найдена ни на одном маршруте", gos_nomer)
+                        # НАШЛИ
+                        found_route = str(route_entry.get("Number", route_number))
+                        log.info("Нашёл '%s' → маршрут %s, остановка '%s'",
+                                 gos_nomer, found_route, board.get("StopName"))
+
+                        try:
+                            eta = int(info[idx])
+                        except (ValueError, IndexError, TypeError):
+                            eta = None
+
+                        # направление: смотрим в кэше найденного маршрута
+                        actual_trips = routes_cache.get(found_route, trips)
+                        direction = None
+                        for sk, dk2 in (("StopsA", "A"), ("StopsB", "B")):
+                            if any(
+                                str(s.get("Id", "")) == str(stop_id)
+                                for s in (actual_trips.get(sk) or [])
+                            ):
+                                direction = actual_trips.get(f"Name{dk2}")
+                                break
+
+                        return {
+                            "type": type_letter,
+                            "route": found_route,
+                            "direction": direction,
+                            "nearest_stop": board.get("StopName") or stop_name,
+                            "eta_minutes": eta,
+                        }
+
+    log.info("find_vehicle: '%s' не найден", gos_nomer)
     return None
